@@ -22,19 +22,20 @@
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/hci.h>
-
 #include <bluetooth/services/nus.h>
 
 #include <dk_buttons_and_leds.h>
+#include <zephyr/drivers/gpio.h>
 
 #include <zephyr/settings/settings.h>
 
 #include <stdio.h>
 #include <string.h>
 
+
 #include <zephyr/logging/log.h>
 
-#define LOG_MODULE_NAME peripheral_uart
+#define LOG_MODULE_NAME nus_main
 LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 
 #define STACKSIZE CONFIG_BT_NUS_THREAD_STACK_SIZE
@@ -86,6 +87,10 @@ UART_ASYNC_ADAPTER_INST_DEFINE(async_adapter);
 #else
 #define async_adapter NULL
 #endif
+
+//gpio addition
+#define MODE_BUTTON DT_ALIAS(gpiocus0) // !io!
+static const struct gpio_dt_spec modebutton = GPIO_DT_SPEC_GET_OR(MODE_BUTTON, gpios, {0});
 
 static void uart_cb(const struct device *dev, struct uart_event *evt, void *user_data)
 {
@@ -554,6 +559,13 @@ void button_changed(uint32_t button_state, uint32_t has_changed)
 }
 #endif /* CONFIG_BT_NUS_SECURITY_ENABLED */
 
+static struct gpio_callback modebutton_cb_data;
+void modebutton_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+{
+	printk("MODE button pressed\n");
+
+}
+
 static void configure_gpio(void)
 {
 	int err;
@@ -569,7 +581,28 @@ static void configure_gpio(void)
 	if (err) {
 		LOG_ERR("Cannot init LEDs (err: %d)", err);
 	}
+
+	// !io!
+	if(!gpio_is_ready_dt(&modebutton))
+	{
+		LOG_ERR("Button device not ready");
+		return;
+	}
+	err = gpio_pin_configure_dt(&modebutton, GPIO_INPUT);
+
+	err = gpio_pin_interrupt_configure_dt(&modebutton, GPIO_INT_EDGE_TO_ACTIVE);
+	if (err != 0) {
+		LOG_ERR("Error: failed to configure interrupt on pin");
+		return;
+	}
+
+	gpio_init_callback(&modebutton_cb_data, modebutton_pressed, BIT(modebutton.pin));
+	gpio_add_callback(modebutton.port, &modebutton_cb_data);
+
+	// !io end
 }
+
+
 
 int main(void)
 {

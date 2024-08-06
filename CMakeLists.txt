@@ -9,8 +9,11 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(NUS_custom)
 
 # NORDIC SDK APP START
+zephyr_include_directories(gpio ble)
 target_sources(app PRIVATE
   src/main.c
+  src/gpio/io.c
+  src/ble/nus.c
 )
-
+target_sources_ifdef(CONFIG_CAN app PRIVATE src/can/can.c)
 # NORDIC SDK APP END
