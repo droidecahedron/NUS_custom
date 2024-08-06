@@ -92,6 +92,44 @@ UART_ASYNC_ADAPTER_INST_DEFINE(async_adapter);
 #define MODE_BUTTON DT_ALIAS(gpiocus0) // !io!
 static const struct gpio_dt_spec modebutton = GPIO_DT_SPEC_GET_OR(MODE_BUTTON, gpios, {0});
 
+//command addition
+static void led_cmd_toggle(void)
+{
+	static bool led_is_on = false; // off by default, dont re-init
+	if(led_is_on)
+	{
+		dk_set_led_off(DK_LED4);
+		led_is_on = false;
+	}
+	else
+	{
+		dk_set_led_on(DK_LED4);
+		led_is_on = false;
+	}
+}
+// queue to message between uart cb and decode work task
+#define COMMAND_LEN 244 // technically maximum size of a NUS message. 251 data length, 3 byte header, 4 byte link layer header.
+#define CMD_QUEUE_SIZE 4
+K_MSGQ_DEFINE(ble_command_queue, sizeof(uint8_t[COMMAND_LEN]), CMD_QUEUE_SIZE, 1); // char alignment
+// kernel work item to avoid processing string in the ble receive callback
+static struct k_work ble_msg_cmd_parse_work;
+static void ble_msg_cmd_parse_work_fn(struct k_work *work)
+{
+	int err;
+	uint8_t cmd[COMMAND_LEN] = "";
+	uint8_t *led_cmd = {"LED"}; // will toggle the LED
+	err = k_msgq_get(&ble_command_queue, &cmd, K_FOREVER);
+	if(err)
+	{
+		LOG_ERR("return val from k_msgq_get: %d", err);
+	}
+
+	LOG_INF("k_msgq data: %s", cmd);
+	char *substr = strstr((char*)cmd, (char*)led_cmd); // returns a pointer to the first char of the found substring, null if not found.
+	substr ? led_cmd_toggle() : printk("\nno cmd\n");
+
+}
+
 static void uart_cb(const struct device *dev, struct uart_event *evt, void *user_data)
 {
 	ARG_UNUSED(dev);
@@ -477,6 +515,7 @@ static void bt_receive_cb(struct bt_conn *conn, const uint8_t *const data,
 	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, ARRAY_SIZE(addr));
 
 	LOG_INF("Received data from: %s", addr);
+	LOG_DBG("data: %s len %d",data, len);
 
 	for (uint16_t pos = 0; pos != len;) {
 		struct uart_data_t *tx = k_malloc(sizeof(*tx));
@@ -512,6 +551,16 @@ static void bt_receive_cb(struct bt_conn *conn, const uint8_t *const data,
 			k_fifo_put(&fifo_uart_tx_data, tx);
 		}
 	}
+
+	//extra work to decode
+	uint8_t msg[COMMAND_LEN] = "";
+	memcpy(msg, data, len);
+	err = k_msgq_put(&ble_command_queue, &msg, K_FOREVER);
+	if(err)
+	{
+		LOG_ERR("retval from k_msgq_put: %d", err);
+	}
+	k_work_submit(&ble_msg_cmd_parse_work);
 }
 
 static struct bt_nus_cb nus_cb = {
@@ -558,12 +607,20 @@ void button_changed(uint32_t button_state, uint32_t has_changed)
 	}
 }
 #endif /* CONFIG_BT_NUS_SECURITY_ENABLED */
+static struct k_work send_ble_button_msg_work;
+static void send_ble_button_msg_work_fn(struct k_work *work)
+{
+	uint8_t *msg_to_send = "button\0";
+	LOG_DBG("gpiocb workq item");
+	bt_nus_send(NULL, msg_to_send, strlen(msg_to_send));
+
+}
 
 static struct gpio_callback modebutton_cb_data;
 void modebutton_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
-	printk("MODE button pressed\n");
-
+	LOG_DBG("gpiocb");
+	k_work_submit(&send_ble_button_msg_work); // nus lib wont let you call bt nus from an ISR, so chuck it on the kernel work queue.
 }
 
 static void configure_gpio(void)
@@ -615,6 +672,9 @@ int main(void)
 	if (err) {
 		error();
 	}
+
+	k_work_init(&ble_msg_cmd_parse_work, ble_msg_cmd_parse_work_fn);
+	k_work_init(&send_ble_button_msg_work, send_ble_button_msg_work_fn);
 
 	if (IS_ENABLED(CONFIG_BT_NUS_SECURITY_ENABLED)) {
 		err = bt_conn_auth_cb_register(&conn_auth_callbacks);
